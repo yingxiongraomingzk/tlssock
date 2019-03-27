@@ -41,7 +41,7 @@ pkg = import('pkgconfig')
 dl = cc.find_library('dl', required: false)
 
 openssl = dependency('openssl', version: '>=1.1.0', required: false)
-gnutls = dependency('gnutls', version: '>=3.6.0', required: false)
+gnutls = dependency('gnutls', version: '>=3.6.7', required: false)
 threads = dependency('threads')
 
 variants = [ openssl, gnutls ]
@@ -61,6 +61,10 @@ ncat = find_program('ncat', required: false)
 cat = find_program('cat').path()
 
 psk = '7df28f5439b5a051cc138b6e12128264'
+
+logfile = run_command(gnuclt, '--logfile', '/dev/null')
+option_exist = not (logfile.stderr().contains('illegal option'))
+
 foreach n: ['4', '6']
   h = 'localhost' + n
 
@@ -93,9 +97,9 @@ foreach n: ['4', '6']
     ]]]
   endif
 
-  if gnuclt.found() and false
+  if gnuclt.found() and option_exist
     tests += [[n, 'PSK', 'clt', 'gnutls-cli', false, [
-      gnuclt.path(), '-p', '%PORT%', '--pskusername=foo', '--pskkey=' + psk,
+      gnuclt.path(), '-p', '%PORT%', '--logfile', '/dev/null', '--pskusername=foo', '--pskkey=' + psk,
                      '--priority', 'NORMAL:+ECDHE-PSK:+DHE-PSK:+PSK', h
     ]]]
   endif
