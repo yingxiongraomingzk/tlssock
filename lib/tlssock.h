@@ -28,6 +28,8 @@
 #define IPPROTO_TLS 253
 #define TLS_CLT_HANDSHAKE 1
 #define TLS_SRV_HANDSHAKE 2
+#define TLS_PSK_USER 3
+#define TLS_PSK_KEY 4
 
 typedef struct {
   void *misc;

@@ -162,7 +162,9 @@ on_conn(options_t *opts, int con, int in, int out, const struct addrinfo *ai)
         srv.psk = srv_psk_cb;
 
       ret = non_setsockopt(con, IPPROTO_TLS,
-                           TLS_SRV_HANDSHAKE, &srv, sizeof(srv));
+                           TLS_PSK_USER, opts->psku, sizeof(opts->psku));
+      ret = non_setsockopt(con, IPPROTO_TLS,
+                           TLS_PSK_KEY, opts->pskk, sizeof(opts->pskk);
     } else {
       tls_clt_handshake_t clt = { .misc = opts };
 
