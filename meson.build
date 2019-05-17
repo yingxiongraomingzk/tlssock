@@ -126,7 +126,7 @@ foreach v: variants
   endif
 
   lib = shared_library('tlssock-' + v.name(), [
-      'lib/tlssock.c', 'lib/tlssock.h',
+      'lib/tlssock.c', 'lib/tlssock.h', 'lib/tls.c',
       'lib/core.c', 'lib/core.h',
       'lib/idx.c', 'lib/idx.h',
       'lib/locks.c', 'lib/locks.h',
