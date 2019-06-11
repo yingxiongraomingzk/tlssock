@@ -42,15 +42,12 @@
 static BIO_METHOD *stream = NULL;
 static BIO_METHOD *dgram = NULL;
 
-struct tls {
-  rwlock_t *lock;
-  size_t ref;
-
+struct tls_prv {
   SSL *ssl;
 };
 
 static int
-o2e(tls_t *tls, int ret)
+o2e(tls_prv_t *tls, int ret)
 {
   switch (SSL_get_error(tls->ssl, ret)) {
   case SSL_ERROR_WANT_CONNECT:
@@ -73,68 +70,25 @@ o2e(tls_t *tls, int ret)
   }
 }
 
-tls_t *
-tls_new(void)
+tls_prv_t *
+tls_prv_new(void)
 {
-  tls_t *tls = NULL;
-
+  tls_prv_t * tls = NULL;
   tls = calloc(1, sizeof(*tls));
+
   if (!tls)
-    return NULL;
+  return NULL;
 
-  tls->lock = rwlock_init();
-  if (!tls->lock) {
-    free(tls);
-    return NULL;
-  }
-
-  tls->ref = 1;
   return tls;
 }
 
 void
-tls_cleanup(tls_t **tls)
+tls_free(tls_prv_t *tls)
 {
-  if (tls)
-    tls_decref(*tls);
-}
-
-tls_t *
-tls_incref(tls_t *tls)
-{
-  if (!tls)
-    return NULL;
-  {
-    rwhold_auto_t *hold = rwlock_wrlock(tls->lock);
-    if (!hold)
-      return NULL;
-
-    tls->ref++;
-  }
-
-  return tls;
-}
-
-tls_t *
-tls_decref(tls_t *tls)
-{
-  if (!tls)
-    return NULL;
-  {
-    rwhold_auto_t *hold = rwlock_wrlock(tls->lock);
-    if (!hold)
-      return NULL;
-
-    if (tls->ref-- > 1)
-      return tls;
-
-    SSL_free(tls->ssl);
-  }
-
-  rwlock_free(tls->lock);
+  SSL_free(tls->ssl);
+ 
   memset(tls, 0, sizeof(*tls));
   free(tls);
-  return NULL;
 }
 
 ssize_t
@@ -144,11 +98,11 @@ tls_read(tls_t *tls, int fd, void *buf, size_t count)
   size_t bytes = 0;
   int ret;
 
-  ret = SSL_read_ex(tls->ssl, buf, count, &bytes);
+  ret = SSL_read_ex(tls->prv->ssl, buf, count, &bytes);
   if (ret > 0)
     return bytes;
 
-  return o2e(tls, ret);
+  return o2e(tls->prv, ret);
 }
 
 ssize_t
@@ -158,15 +112,15 @@ tls_write(tls_t *tls, int fd, const void *buf, size_t count)
   size_t bytes = 0;
   int ret;
 
-  ret = SSL_write_ex(tls->ssl, buf, count, &bytes);
+  ret = SSL_write_ex(tls->prv->ssl, buf, count, &bytes);
   if (ret > 0)
     return bytes;
 
-  return o2e(tls, ret);
+  return o2e(tls->prv, ret);
 }
 
 int
-tls_getsockopt(tls_t *tls, int fd, int optname, void *optval, socklen_t *optlen)
+tls_getsockopt(tls_prv_t *tls, int fd, int optname, void *optval, socklen_t *optlen)
 {
   errno = ENOSYS; // TODO
   return -1;
@@ -176,13 +130,12 @@ static unsigned int
 psk_clt(SSL *ssl, const char *hint, char *id, unsigned int imax,
         unsigned char *psk, unsigned int pmax)
 {
-  const tls_handshake_t *hs = SSL_get_ex_data(ssl, 0);
+  const tls_t *tls = SSL_get_ex_data(ssl, 0);
   unsigned int ret = 0;
-  uint8_t *k = NULL;
-  char *u = NULL;
-  ssize_t l = 0;
+  uint8_t *k = tls->key;
+  char *u = tls->username;
+  ssize_t l = tls->key_size;
 
-  l = hs->clt.psk(hs->clt.misc, &u, &k);
   if (l < 0)
     return 0;
 
@@ -203,12 +156,11 @@ static unsigned int
 psk_srv(SSL *ssl, const char *identity, unsigned char *psk,
         unsigned int max_psk_len)
 {
-  const tls_handshake_t *hs = SSL_get_ex_data(ssl, 0);
+  const tls_t *tls = SSL_get_ex_data(ssl, 0);
   unsigned int ret = 0;
-  uint8_t *k = NULL;
-  ssize_t l = 0;
+  uint8_t *k = tls->key;
+  ssize_t l = tls->key_size;
 
-  l = hs->srv.psk(hs->srv.misc, identity, &k);
   if (l < 0)
     return 0;
 
@@ -265,36 +217,35 @@ error:
 }
 
 int
-tls_handshake(tls_t *tls, int fd, bool client, const tls_handshake_t *hs)
+tls_handshake(tls_t *tls, int fd)
 {
   int ret;
-
-  if (!tls->ssl) {
-    tls->ssl = ssl_new(fd, client);
-    if (!tls->ssl)
+  if (!tls->prv->ssl) {
+    tls->prv->ssl = ssl_new(fd, !tls->is_server);
+    if (!tls->prv->ssl)
       return -1;
   }
 
   /* Prepare callbacks for the handshake. */
-  SSL_set_ex_data(tls->ssl, 0, (void *) hs);
-  if (client)
-    SSL_set_psk_client_callback(tls->ssl, hs->clt.psk ? psk_clt : NULL);
+  SSL_set_ex_data(tls->prv->ssl, 0, tls);
+  if (!tls->is_server)
+    SSL_set_psk_client_callback(tls->prv->ssl, *tls->key ? psk_clt : NULL);
   else
-    SSL_set_psk_server_callback(tls->ssl, hs->srv.psk ? psk_srv : NULL);
+    SSL_set_psk_server_callback(tls->prv->ssl, *tls->key ? psk_srv : NULL);
 
-  ret = SSL_do_handshake(tls->ssl);
+  ret = SSL_do_handshake(tls->prv->ssl);
 
   /* Remove callbacks from the handshake. */
-  SSL_set_ex_data(tls->ssl, 0, NULL);
-  if (client)
-    SSL_set_psk_client_callback(tls->ssl, NULL);
+  SSL_set_ex_data(tls->prv->ssl, 0, NULL);
+  if (tls->is_server)
+    SSL_set_psk_client_callback(tls->prv->ssl, NULL);
   else
-    SSL_set_psk_server_callback(tls->ssl, NULL);
+    SSL_set_psk_server_callback(tls->prv->ssl, NULL);
 
   if (ret == 1)
     return 0;
 
-  return o2e(tls, ret);
+  return o2e(tls->prv, ret);
 }
 
 static long
