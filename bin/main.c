@@ -120,29 +120,6 @@ keydup(const options_t *o, uint8_t **key)
   return size;
 }
 
-static ssize_t
-srv_psk_cb(void *m, const char *username, uint8_t **key)
-{
-  const options_t *o = m;
-
-  if (strcmp(username, o->psku) != 0)
-    return -1;
-
-  return keydup(o, key);
-}
-
-static ssize_t
-clt_psk_cb(void *m, char **username, uint8_t **key)
-{
-  const options_t *o = m;
-
-  *username = strdup(o->psku);
-  if (!*username)
-    return -1;
-
-  return keydup(o, key);
-}
-
 static status_t
 on_conn(options_t *opts, int con, int in, int out, const struct addrinfo *ai)
 {
@@ -154,27 +131,94 @@ on_conn(options_t *opts, int con, int in, int out, const struct addrinfo *ai)
 
   if (ai->ai_protocol == IPPROTO_TLS) {
     int ret;
+    char* username = NULL;
+    socklen_t username_size;
+    size_t key_size;
+    uint8_t *key = NULL;
 
     if (opts->listen) {
-      tls_srv_handshake_t srv = { .misc = opts };
-
-      if (opts->psku)
-        srv.psk = srv_psk_cb;
-
       ret = non_setsockopt(con, IPPROTO_TLS,
-                           TLS_SRV_HANDSHAKE, &srv, sizeof(srv));
+                           TLS_IS_SERVER, &(int) {1}, sizeof(int));
+
+      if (ret != 0)
+        goto fail;
+
+      if (opts->psku) {
+        ret = non_setsockopt(con, IPPROTO_TLS,
+                             TLS_PSK, &(int) {1}, sizeof(int));
+
+        if (ret != 0)
+          goto fail;
+
+        while (handshake(con) == -1) {
+          switch (errno)
+          {
+            case ENOKEY:
+              ret = getsockopt(con, IPPROTO_TLS,
+                               TLS_PSK_USER, username, &username_size);
+              if (ret != 0)
+                goto fail;
+
+              if (strcmp(username, opts->psku) == 0) {
+                key_size = keydup(opts, &key);
+                ret = non_setsockopt(con, IPPROTO_TLS,
+                                     TLS_PSK_KEY, key, key_size);
+                explicit_bzero(key, key_size);
+                free(key);
+
+              if (ret != 0)
+                goto fail;
+            } else {
+              fprintf(stderr, "Username is incorrect.\n");
+              goto fail;
+            }
+            break;
+
+            default:
+              goto fail;
+              break;
+          }
+        }
+      }
     } else {
-      tls_clt_handshake_t clt = { .misc = opts };
-
-      if (opts->psku)
-        clt.psk = clt_psk_cb;
-
       ret = non_setsockopt(con, IPPROTO_TLS,
-                           TLS_CLT_HANDSHAKE, &clt, sizeof(clt));
+                           TLS_IS_SERVER, &(int) {0}, sizeof(int));
+      if (ret != 0)
+        goto fail;
+
+      if (opts->psku) {
+        ret = non_setsockopt(con, IPPROTO_TLS,
+                             TLS_PSK, &(int) {1}, sizeof(int));
+
+        if (ret != 0)
+          goto fail;
+
+        ret = non_setsockopt(con, IPPROTO_TLS, TLS_PSK_USER,
+                             opts->psku, strlen(opts->psku));
+
+        if (ret != 0)
+          goto fail;
+
+        key_size = keydup(opts, &key);
+        ret = non_setsockopt(con, IPPROTO_TLS,
+                             TLS_PSK_KEY, key, key_size);
+        explicit_bzero(key, key_size);
+        free(key);
+
+        if (ret != 0)
+          goto fail;
+        }
+
+      ret = handshake(con);
+
+      if (ret != 0)
+        goto fail;
     }
 
-    if (ret != 0) {
+  if (0) {
+    fail:
       fprintf(stderr, "%m: Unable to complete TLS handshake!\n");
+      fprintf(stderr, "Errno is %d\n", errno);
       shutdown(con, SHUT_RDWR);
       return STATUS_FAILURE;
     }

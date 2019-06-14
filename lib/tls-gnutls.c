@@ -39,13 +39,12 @@
 #include <fcntl.h>
 #include <poll.h>
 
-struct tls {
-  rwlock_t *lock;
-  size_t ref;
+struct tls_prv {
 
   gnutls_session_t session;
 
   struct {
+
     union {
       struct {
         gnutls_psk_client_credentials_t psk;
@@ -90,50 +89,20 @@ g2e(int ret)
   }
 }
 
-tls_t *
-tls_new(void)
+tls_prv_t *
+tls_prv_new(void)
 {
-  tls_t *tls = NULL;
-
+  tls_prv_t * tls = NULL;
   tls = calloc(1, sizeof(*tls));
+
   if (!tls)
-    return NULL;
-
-  tls->lock = rwlock_init();
-  if (!tls->lock) {
-    free(tls);
-    return NULL;
-  }
-
-  tls->ref = 1;
-  return tls;
-}
-
-void
-tls_cleanup(tls_t **tls)
-{
-  if (tls)
-    tls_decref(*tls);
-}
-
-tls_t *
-tls_incref(tls_t *tls)
-{
-  if (!tls)
-    return NULL;
-  {
-    rwhold_auto_t *hold = rwlock_wrlock(tls->lock);
-    if (!hold)
-      return NULL;
-
-    tls->ref++;
-  }
+  return NULL;
 
   return tls;
 }
 
 static void
-tls_creds_clear(tls_t *tls, bool client)
+tls_creds_clear(tls_prv_t *tls, bool client)
 {
   if (tls->session)
     gnutls_credentials_clear(tls->session);
@@ -150,7 +119,7 @@ tls_creds_clear(tls_t *tls, bool client)
 }
 
 static void
-tls_clear(tls_t *tls)
+tls_clear(tls_prv_t *tls)
 {
   if (!tls || !tls->session)
     return;
@@ -160,44 +129,31 @@ tls_clear(tls_t *tls)
   tls->session = NULL;
 }
 
-tls_t *
-tls_decref(tls_t *tls)
+void
+tls_free(tls_prv_t *tls)
 {
-  if (!tls)
-    return NULL;
+  tls_clear(tls);
 
-  {
-    rwhold_auto_t *hold = rwlock_wrlock(tls->lock);
-    if (!hold)
-      return NULL;
-
-    if (tls->ref-- > 1)
-      return tls;
-
-    tls_clear(tls);
-  }
-
-  rwlock_free(tls->lock);
   memset(tls, 0, sizeof(*tls));
-  return NULL;
+  free(tls);
 }
 
 ssize_t
 tls_read(tls_t *tls, int fd, void *buf, size_t count)
 {
   rwhold_auto_t *hold = rwlock_rdlock(tls->lock);
-  return g2e(gnutls_record_recv(tls->session, buf, count));
+  return g2e(gnutls_record_recv(tls->prv->session, buf, count));
 }
 
 ssize_t
 tls_write(tls_t *tls, int fd, const void *buf, size_t count)
 {
   rwhold_auto_t *hold = rwlock_rdlock(tls->lock);
-  return g2e(gnutls_record_send(tls->session, buf, count));
+  return g2e(gnutls_record_send(tls->prv->session, buf, count));
 }
 
 int
-tls_getsockopt(tls_t *tls, int fd, int optname, void *optval, socklen_t *optlen)
+tls_getsockopt(tls_prv_t *tls, int fd, int optname, void *optval, socklen_t *optlen)
 {
   errno = ENOSYS; // TODO
   return -1;
@@ -261,12 +217,11 @@ get_flags(int fd, bool client)
 static int
 psk_clt(gnutls_session_t session, char **username, gnutls_datum_t *key)
 {
-  const tls_handshake_t *hs = gnutls_session_get_ptr(session);
-  uint8_t *k = NULL;
-  char *u = NULL;
-  ssize_t l = 0;
+  const tls_t *tls = gnutls_session_get_ptr(session);
+  uint8_t *k = tls->key;
+  char *u = tls->username;
+  ssize_t l = tls->key_size;
 
-  l = hs->clt.psk(hs->clt.misc, &u, &k);
   if (l < 0)
     return -1;
 
@@ -300,11 +255,10 @@ psk_clt(gnutls_session_t session, char **username, gnutls_datum_t *key)
 static int
 psk_srv(gnutls_session_t session, const char *username, gnutls_datum_t *key)
 {
-  const tls_handshake_t *hs = gnutls_session_get_ptr(session);
-  uint8_t *k = NULL;
-  ssize_t l = 0;
+  const tls_t *tls = gnutls_session_get_ptr(session);
+  uint8_t *k = tls->key;
+  ssize_t l = tls->key_size;
 
-  l = hs->srv.psk(hs->srv.misc, username, &k);
   if (l < 0)
     return -1;
 
@@ -320,64 +274,64 @@ psk_srv(gnutls_session_t session, const char *username, gnutls_datum_t *key)
 }
 
 int
-tls_handshake(tls_t *tls, int fd, bool client, const tls_handshake_t *hs)
+tls_handshake(tls_t *tls, int fd)
 {
   int ret = -1;
 
-  if (!tls->session) {
+  if (!tls->prv->session) {
     static const char *priority = "+ECDHE-PSK:+DHE-PSK:+PSK";
     int flags = 0;
 
-    flags = get_flags(fd, client);
+    flags = get_flags(fd, !tls->is_server);
     if (flags < 0)
       return flags;
 
-    ret = g2e(gnutls_init(&tls->session, flags));
+    ret = g2e(gnutls_init(&tls->prv->session, flags));
     if (ret < 0)
       return ret;
 
-    gnutls_transport_set_int(tls->session, fd);
-    gnutls_transport_set_pull_function(tls->session, pull_func);
-    gnutls_transport_set_push_function(tls->session, push_func);
-    gnutls_transport_set_vec_push_function(tls->session, vec_push_func);
-    gnutls_transport_set_pull_timeout_function(tls->session, pull_timeout_func);
-    gnutls_handshake_set_timeout(tls->session, 0);
+    gnutls_transport_set_int(tls->prv->session, fd);
+    gnutls_transport_set_pull_function(tls->prv->session, pull_func);
+    gnutls_transport_set_push_function(tls->prv->session, push_func);
+    gnutls_transport_set_vec_push_function(tls->prv->session, vec_push_func);
+    gnutls_transport_set_pull_timeout_function(tls->prv->session, pull_timeout_func);
+    gnutls_handshake_set_timeout(tls->prv->session, 0);
 
-    ret = g2e(gnutls_set_default_priority_append(tls->session, priority, NULL, 0));
+    ret = g2e(gnutls_set_default_priority_append(tls->prv->session, priority, NULL, 0));
     if (ret < 0)
       goto error;
   }
 
-  if (client && hs->clt.psk) {
-    ret = g2e(gnutls_psk_allocate_client_credentials(&tls->creds.clt.psk));
+  if (!tls->is_server && tls->key) {
+    ret = g2e(gnutls_psk_allocate_client_credentials(&tls->prv->creds.clt.psk));
     if (ret < 0)
       goto error;
 
-    gnutls_psk_set_client_credentials_function(tls->creds.clt.psk, psk_clt);
-    ret = g2e(gnutls_credentials_set(tls->session, GNUTLS_CRD_PSK,
-                                     tls->creds.clt.psk));
+    gnutls_psk_set_client_credentials_function(tls->prv->creds.clt.psk, psk_clt);
+    ret = g2e(gnutls_credentials_set(tls->prv->session, GNUTLS_CRD_PSK,
+                                     tls->prv->creds.clt.psk));
     if (ret < 0)
       goto error;
-  } else if (!client && hs->srv.psk) {
-    ret = g2e(gnutls_psk_allocate_server_credentials(&tls->creds.srv.psk));
+  } else if (tls->is_server && tls->key) {
+    ret = g2e(gnutls_psk_allocate_server_credentials(&tls->prv->creds.srv.psk));
     if (ret < 0)
       goto error;
 
-    gnutls_psk_set_server_credentials_function(tls->creds.srv.psk, psk_srv);
-    ret = g2e(gnutls_credentials_set(tls->session, GNUTLS_CRD_PSK,
-                                     tls->creds.srv.psk));
+    gnutls_psk_set_server_credentials_function(tls->prv->creds.srv.psk, psk_srv);
+    ret = g2e(gnutls_credentials_set(tls->prv->session, GNUTLS_CRD_PSK,
+                                     tls->prv->creds.srv.psk));
     if (ret < 0)
       goto error;
   }
 
-  gnutls_session_set_ptr(tls->session, (void *) hs);
-  ret = g2e(gnutls_handshake(tls->session));
-  gnutls_session_set_ptr(tls->session, NULL);
-  tls_creds_clear(tls, client);
+  gnutls_session_set_ptr(tls->prv->session, tls);
+  ret = g2e(gnutls_handshake(tls->prv->session));
+  gnutls_session_set_ptr(tls->prv->session, NULL);
+  tls_creds_clear(tls->prv, !tls->is_server);
   if (ret >= 0 || errno == EAGAIN)
     return ret;
 
 error:
-  tls_clear(tls);
+  tls_clear(tls->prv);
   return ret;
 }

@@ -24,19 +24,12 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #define IPPROTO_TLS 253
-#define TLS_CLT_HANDSHAKE 1
-#define TLS_SRV_HANDSHAKE 2
+#define TLS_IS_SERVER 1
+#define TLS_PSK 2
+#define TLS_PSK_USER 3
+#define TLS_PSK_KEY 4
 
-typedef struct {
-  void *misc;
-
-  ssize_t (*psk)(void *misc, char **username, uint8_t **key);
-} tls_clt_handshake_t;
-
-typedef struct {
-  void *misc;
-
-  ssize_t (*psk)(void *misc, const char *username, uint8_t **key);
-} tls_srv_handshake_t;
+int handshake(int sockfd);

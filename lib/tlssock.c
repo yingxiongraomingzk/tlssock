@@ -27,6 +27,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
+#include <string.h>
 
 static inline bool
 is_tls(int fd, int errnum)
@@ -79,30 +80,6 @@ test_tls_new(int fd)
   }
 
   return tls_new();
-}
-
-static const tls_opt_t *
-tlsopt(int optname, const void *optval, socklen_t optlen)
-{
-  switch (optname) {
-  case TLS_CLT_HANDSHAKE:
-    if (optlen == sizeof(tls_clt_handshake_t))
-      return optval;
-
-    errno = EINVAL;
-    return NULL;
-
-  case TLS_SRV_HANDSHAKE:
-    if (optlen == sizeof(tls_srv_handshake_t))
-      return optval;
-
-    errno = EINVAL;
-    return NULL;
-
-  default:
-    errno = ENOPROTOOPT;
-    return NULL;
-  }
 }
 
 int
@@ -180,7 +157,40 @@ getsockopt(int sockfd, int level, int optname, void *optval, socklen_t *optlen)
       return -1;
     }
 
-    return tls_getsockopt(tls, sockfd, optname, optval, optlen);
+    switch(optname) {
+      case TLS_IS_SERVER:
+        *(int *) optval = tls->is_server;
+        *optlen = sizeof(int);
+
+        break;
+
+      case TLS_PSK:
+        *(int *) optval = tls->auth_method;
+        *optlen = sizeof(int);
+
+        break;
+
+      case TLS_PSK_USER:
+        if (tls->username == NULL) {
+          fprintf(stderr, "Username has not been set!\n");
+          return -1;
+        }
+
+        *optlen = strlen(tls->username);
+        char *username = strdup(tls->username);
+        optval = username;
+
+        break;
+
+      case TLS_PSK_KEY:
+        *optlen = tls->key_size;
+        optval = malloc(tls->key_size);
+        memcpy(optval, tls->key, tls->key_size);
+
+        break;
+    }
+    //return tls_getsockopt(tls->tls_prv, sockfd, optname, optval, optlen);
+    return 0;
   }
 
   ret = NEXT(getsockopt)(sockfd, level, optname, optval, optlen);
@@ -290,11 +300,6 @@ setsockopt(int sockfd, int level, int optname,
 
   /* Pass TLS level options into the tls_t layer. */
   if (level == IPPROTO_TLS) {
-    const tls_opt_t *opt;
-
-    opt = tlsopt(optname, optval, optlen);
-    if (!opt)
-      return -1;
 
     tls = idx_get(sockfd);
     if (!tls) {
@@ -303,12 +308,65 @@ setsockopt(int sockfd, int level, int optname,
     }
 
     switch (optname) {
-    case TLS_CLT_HANDSHAKE:
-      return tls_handshake(tls, sockfd, true, &opt->handshake);
+      case TLS_IS_SERVER:
+        if (tls->handshake_start == true) {
+          fprintf(stderr, "TLS_IS_SERVER has been set.\n");
+          return -1;
+        }
 
-    case TLS_SRV_HANDSHAKE:
-      return tls_handshake(tls, sockfd, false, &opt->handshake);
+        if (*(int *)optval == 1)
+          tls->is_server = 1;
+        else
+          tls->is_server = 0;
+
+        break;
+
+      case TLS_PSK:
+        if (tls->handshake_start == true) {
+          fprintf(stderr, "PSK has been set.\n");
+          return -1;
+        }
+
+        if (*(int *)optval == 1)
+          tls->auth_method = 1;
+        else
+        tls->auth_method = 0;
+
+        break;
+
+      case TLS_PSK_USER:
+        if (tls->username != NULL) {
+          fprintf(stderr, "Username has been set.\n");
+          return -1;
+        }
+
+        if (strlen((char *)optval) != optlen) {
+          errno = EINVAL;// or?
+          return -1;
+        }
+
+        tls->username = strdup(optval);
+
+        if (tls->username == NULL) {
+          fprintf(stderr, "Error in copying username, the errno is %d\n", errno);
+          return -1;
+        }
+
+        break;
+
+      case TLS_PSK_KEY:
+        if (tls->key != NULL) {
+          fprintf(stderr, "Key has been set.\n");
+          return -1;
+        }
+
+        tls->key_size = optlen;
+        tls->key = malloc(optlen);
+        memcpy(tls->key, optval, optlen);
+
+        break;
     }
+    return 0;
   }
 
   /* We only override SO_PROTOCOL on SOL_SOCKET. */
@@ -386,4 +444,18 @@ write(int fd, const void *buf, size_t count)
     return NEXT(write)(fd, buf, count);
 
   return tls_write(tls, fd, buf, count);
+}
+
+int handshake(int sockfd)
+{
+  tls_auto_t *tls =NULL;
+
+  tls = idx_get(sockfd);
+  if (!tls) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  tls->handshake_start = true;
+  return tls_handshake(tls, sockfd);
 }

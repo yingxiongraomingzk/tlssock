@@ -21,30 +21,45 @@
 
 #pragma once
 
+#include "locks.h"
 #include "tlssock.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #define tls_auto_t tls_t __attribute__((cleanup(tls_cleanup)))
 
-typedef union {
-  tls_clt_handshake_t clt;
-  tls_srv_handshake_t srv;
-} tls_handshake_t;
+typedef struct tls_prv tls_prv_t;
 
-typedef union {
-  tls_handshake_t handshake;
-} tls_opt_t;
+typedef struct {
+    bool handshake_start;
+    int is_server;
+    uint64_t auth_method;
+    char *username;
+    uint8_t *key;
+    size_t key_size;
+    rwlock_t *lock;
+    size_t ref;
 
-typedef struct tls tls_t;
+    tls_prv_t *prv;
+} tls_t;
 
 tls_t *
 tls_new(void);
 
+tls_prv_t *
+tls_prv_new(void);
+
 void
 tls_cleanup(tls_t **tls);
+
+void
+tls_t_cleanup(tls_t *tls);
+
+void
+tls_free(tls_prv_t *tls);
 
 tls_t *
 tls_incref(tls_t *tls);
@@ -59,8 +74,8 @@ ssize_t
 tls_write(tls_t *tls, int fd, const void *buf, size_t count);
 
 int
-tls_getsockopt(tls_t *tls, int fd, int optname,
+tls_getsockopt(tls_prv_t *tls, int fd, int optname,
                void *optval, socklen_t *optlen);
 
 int
-tls_handshake(tls_t *tls, int fd, bool client, const tls_handshake_t *hs);
+tls_handshake(tls_t *tls, int fd);
